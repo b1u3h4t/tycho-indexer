@@ -7,7 +7,7 @@ use alloy::rpc::client::{ClientBuilder, RpcClient};
 use async_trait::async_trait;
 use ethers::{
     prelude::{spoof, Middleware},
-    providers::{Http, Provider},
+    providers::{Http, Provider, ProviderError},
     types::{
         Address as EthersAddress, BlockId, Bytes as EthersBytes, GethDebugBuiltInTracerType,
         GethDebugTracerType, GethDebugTracingCallOptions, GethDebugTracingOptions, GethTrace,
@@ -16,6 +16,7 @@ use ethers::{
     },
 };
 use serde_json::{json, Value};
+use tracing::warn;
 use tycho_common::{
     keccak256,
     models::{
@@ -147,7 +148,9 @@ impl EVMEntrypointService {
             .request("eth_createAccessList", rpc_params)
             .await
             .map_err(|e| {
-                RPCError::UnknownError(format!("eth_createAccessList call failed: {e}"))
+                RPCError::RequestError(ProviderError::CustomError(format!(
+                    "eth_createAccessList call failed: {e}"
+                ))) //TODO: Change this weird type casting when we completely remove ethers-rs
             })?;
 
         res.try_get_accessed_slots()
@@ -268,6 +271,18 @@ impl EntryPointTracer for EVMEntrypointService {
         results
     }
 }
+
+// // Check if the outermost call contains an error
+// fn check_tracing_failure(call: &CallFrame) -> Option<String> {
+//     if let Some(err) = &call.error {
+//         warn!(
+//             "Error in call frame: {:?}, input:{:?}, target:{:?}, output:{:?}, gas_used:{:?},
+// gas:{:?}, value:{:?}, call_type:{:?}",             err, call.input, call.to, call.output,
+// call.gas_used, call.gas, call.value, call.typ         );
+//         return Some(err.to_string());
+//     }
+//     None
+// }
 
 #[cfg(test)]
 mod tests {
@@ -564,6 +579,70 @@ mod tests {
             .unwrap();
 
         assert_eq!(traced_entry_points, vec![]);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a RPC connection"]
+    async fn test_trace_failing_call() {
+        let url = env::var("RPC_URL").expect("RPC_URL is not set");
+        let tracer = EVMEntrypointService::try_from_url(&url).unwrap();
+        let entry_points = vec![EntryPointWithTracingParams::new(
+            EntryPoint::new(
+                "1a8f81c256aee9c640e14bb0453ce247ea0dfe6f:unknown()".to_string(),
+                Bytes::from_str("1a8f81c256aee9c640e14bb0453ce247ea0dfe6f").unwrap(),
+                "unknown()".to_string(),
+            ),
+            TracingParams::RPCTracer(RPCTracerParams::new(
+                None,
+                Bytes::from(&keccak256("unknown()").to_vec()[0..4]),
+            )),
+        )];
+        let traced_entry_points = tracer
+            .trace(
+                // Block 22589134 hash
+                Bytes::from_str(
+                    "0xf5e2c5bc64ba61e1230e34b2d5d8906416633100919b477d17a7c6fd69cde31d",
+                )
+                .unwrap(),
+                entry_points.clone(),
+            )
+            .await;
+
+        assert_eq!(traced_entry_points.len(), 1);
+        dbg!(&traced_entry_points[0]);
+        assert!(matches!(traced_entry_points[0], Err(RPCError::TracingFailure(_))));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a RPC connection"]
+    async fn test_trace_failing_rpc() {
+        let url = "https://fake_rpc.com/eth";
+        let tracer = EVMEntrypointService::try_from_url(url).unwrap();
+        let entry_points = vec![EntryPointWithTracingParams::new(
+            EntryPoint::new(
+                "1a8f81c256aee9c640e14bb0453ce247ea0dfe6f:unknown()".to_string(),
+                Bytes::from_str("1a8f81c256aee9c640e14bb0453ce247ea0dfe6f").unwrap(),
+                "unknown()".to_string(),
+            ),
+            TracingParams::RPCTracer(RPCTracerParams::new(
+                None,
+                Bytes::from(&keccak256("unknown()").to_vec()[0..4]),
+            )),
+        )];
+        let traced_entry_points = tracer
+            .trace(
+                // Block 22589134 hash
+                Bytes::from_str(
+                    "0xf5e2c5bc64ba61e1230e34b2d5d8906416633100919b477d17a7c6fd69cde31d",
+                )
+                .unwrap(),
+                entry_points.clone(),
+            )
+            .await;
+
+        assert_eq!(traced_entry_points.len(), 1);
+        dbg!(&traced_entry_points[0]);
+        assert!(matches!(traced_entry_points[0], Err(RPCError::RequestError(_))));
     }
 
     #[tokio::test]
